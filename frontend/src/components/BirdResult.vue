@@ -3,14 +3,56 @@ defineProps({
   result: {
     type: Object,
     default: null
+  },
+  showReward: {
+    type: Boolean,
+    default: false
   }
 })
+
+defineEmits(['view-flock'])
 </script>
 
 <template>
   <div v-if="result" class="result-card">
+
+    <!-- Reward -->
+    <template v-if="showReward && result.flock?.added">
+      <p class="result-icon">✨</p>
+
+      <p class="result-label">
+        {{ result.flock.new_discovery
+          ? 'ADDED TO YOUR FLOCK'
+          : 'ALREADY IN YOUR FLOCK' }}
+      </p>
+
+      <h2>{{ result.bird }}</h2>
+
+      <p class="scientific">
+        {{ result.scientific_name }}
+      </p>
+
+      <div class="xp">
+        <span>⭐</span>
+        +{{ result.flock.xp_earned }} XP
+      </div>
+
+      <p class="level">
+        LEVEL {{ result.flock.level }}
+      </p>
+
+      <div class="progress">
+        <div
+          class="progress-fill"
+          :style="{
+            width: `${result.flock.total_xp % 100}%`
+          }"
+        ></div>
+      </div>
+    </template>
+
     <!-- No prediction -->
-    <template v-if="!result.bird">
+    <template v-else-if="!result.bird">
       <p class="result-icon">🌿</p>
 
       <p class="result-label">
@@ -25,9 +67,9 @@ defineProps({
       </p>
     </template>
 
-    <!-- Low confidence -->
+    <!-- Very low confidence -->
     <template
-      v-else-if="result.confidence < 0.40"
+      v-else-if="result.confidence < 0.20"
     >
       <p class="result-icon">🌿</p>
 
@@ -56,7 +98,7 @@ defineProps({
       </p>
     </template>
 
-    <!-- Possible identification -->
+    <!-- Possible -->
     <template
       v-else-if="result.confidence < 0.70"
     >
@@ -82,7 +124,7 @@ defineProps({
       </p>
     </template>
 
-    <!-- Confident identification -->
+    <!-- Confident but waiting for reward -->
     <template v-else>
       <p class="result-icon">🐦</p>
 
@@ -105,6 +147,7 @@ defineProps({
         That's a confident identification.
       </p>
     </template>
+
   </div>
 </template>
 
@@ -159,5 +202,37 @@ defineProps({
   margin: 16px 0 0;
   color: #59655c;
   line-height: 1.5;
+}
+
+.xp {
+  margin-top: 28px;
+  font-size: 28px;
+  font-weight: 800;
+}
+
+.xp span {
+  margin-right: 6px;
+}
+
+.level {
+  margin: 12px 0;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.15em;
+}
+
+.progress {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e5e1d6;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #1d2a21;
+  transition: width 0.5s ease;
 }
 </style>

@@ -1,6 +1,6 @@
 <template>
   <header class="brand-header">
-    <p class="eyebrow">TOUCHGRASS</p>
+    <p class="eyebrow">HEARWILD</p>
 
     <h1>
       Listen to the world<br />
@@ -8,8 +8,7 @@
     </h1>
 
     <p class="subtitle">
-      Identify a bird by its sound, learn something new,
-      then put your phone away.
+      Identify a bird by its sound, then get back outside.
     </p>
   </header>
 </template>

@@ -1,128 +1,387 @@
-from pathlib import Path
 import subprocess
+import tempfile
+from pathlib import Path
 
-import birdnet
+import httpx
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="TouchGrass API")
+import birdnet
+
+from database import (
+    add_discovery,
+    get_flock,
+    init_db,
+)
+
+app = FastAPI(title="HearWild API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
 
-print("Loading BirdNET V3 ONNX...")
-
-model = birdnet.load(
+MODEL = birdnet.load(
     "acoustic",
     "3.0",
     "onnx",
 )
 
-print("BirdNET loaded!")
 
-
-@app.get("/")
-def root():
-    return {
-        "name": "TouchGrass API",
-        "status": "running",
-    }
+init_db()
 
 
 @app.get("/health")
-def health():
+async def health():
     return {
         "status": "ok",
     }
 
 
-@app.post("/identify")
-async def identify(file: UploadFile = File(...)):
-    webm_file = UPLOAD_DIR / "input.webm"
-    wav_file = UPLOAD_DIR / "input.wav"
+async def get_bird_info(scientific_name: str):
+    """
+    Get a short bird description and image from Wikimedia Commons.
+    """
 
-    contents = await file.read()
-    webm_file.write_bytes(contents)
+    url = "https://commons.wikimedia.org/w/api.php"
 
-    print(f"Received: {file.filename}")
-    print(f"Size: {len(contents)} bytes")
+    headers = {
+        "User-Agent": (
+            "HearWild/1.0 "
+            "(open-source bird companion; "
+            "https://github.com/praveen-pravi6B/hearwild)"
+        ),
+        "Accept": "application/json",
+    }
 
-    # Convert browser WebM/Opus → WAV
+    params = {
+        "action": "query",
+        "format": "json",
+        "generator": "search",
+        "gsrsearch": scientific_name,
+        "gsrnamespace": 6,
+        "gsrlimit": 1,
+        "prop": "imageinfo",
+        "iiprop": "url|extmetadata",
+        "iiurlwidth": 960,
+    }
+
+    image_url = None
+    description = None
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=10,
+            headers=headers,
+        ) as client:
+
+            response = await client.get(
+                url,
+                params=params,
+            )
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            pages = data.get("query", {}).get("pages", {})
+
+            for page in pages.values():
+                image_info = page.get("imageinfo", [{}])[0]
+
+                image_url = (
+                    image_info.get("thumburl")
+                    or image_info.get("url")
+                )
+
+                metadata = image_info.get(
+                    "extmetadata",
+                    {},
+                )
+
+                description_value = metadata.get(
+                    "ImageDescription"
+                )
+
+                if description_value:
+                    description = (
+                        description_value.get("value")
+                        or ""
+                    )
+
+                break
+
+    except Exception:
+        pass
+
+    return {
+        "image_url": image_url,
+        "description": clean_description(description),
+    }
+
+
+def clean_description(description):
+    """
+    Keep the flock description short and remove HTML.
+    """
+
+    if not description:
+        return None
+
+    import re
+
+    description = re.sub(
+        r"<[^>]+>",
+        "",
+        description,
+    )
+
+    description = re.sub(
+        r"\s+",
+        " ",
+        description,
+    ).strip()
+
+    if not description:
+        return None
+
+    sentences = re.split(
+        r"(?<=[.!?])\s+",
+        description,
+    )
+
+    short_description = " ".join(
+        sentences[:2]
+    ).strip()
+
+    if len(short_description) > 220:
+        short_description = (
+            short_description[:217].rsplit(
+                " ",
+                1,
+            )[0]
+            + "..."
+        )
+
+    return short_description
+
+
+@app.get("/flock")
+async def flock():
+    """
+    Return the user's flock.
+
+    Existing birds without an image or description are
+    backfilled from Wikimedia.
+    """
+
+    current_flock = get_flock()
+
+    for bird in current_flock["birds"]:
+
+        if (
+            bird.get("image_url")
+            and bird.get("description")
+        ):
+            continue
+
+        info = await get_bird_info(
+            bird["scientific_name"]
+        )
+
+        if not info["image_url"] and not info["description"]:
+            continue
+
+        from database import (
+            update_bird_image,
+            update_bird_description,
+        )
+
+        if (
+            not bird.get("image_url")
+            and info["image_url"]
+        ):
+            update_bird_image(
+                bird["common_name"],
+                info["image_url"],
+            )
+
+        if (
+            not bird.get("description")
+            and info["description"]
+        ):
+            update_bird_description(
+                bird["common_name"],
+                info["description"],
+            )
+
+    return get_flock()
+
+
+async def convert_to_wav(
+    input_path: str,
+    output_path: str,
+):
     subprocess.run(
         [
             "ffmpeg",
             "-y",
             "-i",
-            str(webm_file),
+            input_path,
             "-ar",
             "48000",
             "-ac",
             "1",
-            str(wav_file),
+            output_path,
         ],
         check=True,
-        capture_output=True,
-        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
-    print("Audio converted to WAV")
 
-    # Run BirdNET
-    predictions = model.predict(
-        str(wav_file),
-        n_workers=1,
-        batch_size=1,
+def parse_species_name(species_name: str):
+    """
+    BirdNET returns species names in a form similar to:
+
+        Strix aluco_Tawny Owl
+
+    Convert that into:
+
+        scientific name
+        common name
+    """
+
+    if "_" in species_name:
+        scientific_name, common_name = (
+            species_name.split("_", 1)
+        )
+    else:
+        scientific_name = species_name
+        common_name = species_name
+
+    return (
+        common_name.strip(),
+        scientific_name.strip(),
     )
 
-    df = predictions.to_dataframe()
 
-    # BirdNET may return no predictions for silence,
-    # background noise, or an unrecognizable recording.
-    if df.empty:
-        print("No bird prediction returned")
+@app.post("/identify")
+async def identify(
+    file: UploadFile = File(...),
+):
+    suffix = Path(
+        file.filename or "recording.webm"
+    ).suffix or ".webm"
 
+    with tempfile.TemporaryDirectory() as temp_dir:
+
+        input_path = (
+            Path(temp_dir)
+            / f"input{suffix}"
+        )
+
+        wav_path = (
+            Path(temp_dir)
+            / "audio.wav"
+        )
+
+        audio = await file.read()
+
+        input_path.write_bytes(audio)
+
+        try:
+            await convert_to_wav(
+                str(input_path),
+                str(wav_path),
+            )
+
+            predictions = MODEL.predict(
+                str(wav_path),
+                n_workers=1,
+                batch_size=1,
+            )
+
+            dataframe = predictions.to_dataframe()
+
+        except Exception as error:
+            return {
+                "species": None,
+                "scientific_name": None,
+                "confidence": 0,
+                "added_to_flock": False,
+                "error": str(error),
+            }
+
+    if dataframe.empty:
         return {
-            "bird": None,
+            "species": None,
             "scientific_name": None,
-            "confidence": 0.0,
-            "confidence_level": "unknown",
-            "message": (
-                "We couldn't identify a bird in this recording."
-            ),
+            "confidence": 0,
+            "added_to_flock": False,
         }
 
-    best_prediction = df.loc[df["confidence"].idxmax()]
+    best_prediction = dataframe.iloc[
+        dataframe["confidence"].idxmax()
+    ]
 
-    species = best_prediction["species_name"]
-    confidence = float(best_prediction["confidence"])
+    species_name = str(
+        best_prediction["species_name"]
+    )
 
-    if "_" in species:
-        scientific_name, common_name = species.split("_", 1)
-    else:
-        scientific_name = species
-        common_name = species
+    confidence = float(
+        best_prediction["confidence"]
+    )
 
-    if confidence >= 0.70:
-        confidence_level = "confident"
-    elif confidence >= 0.40:
-        confidence_level = "possible"
-    else:
-        confidence_level = "unknown"
+    common_name, scientific_name = (
+        parse_species_name(species_name)
+    )
+
+    # Very low confidence.
+    if confidence < 0.20:
+        return {
+            "species": common_name,
+            "scientific_name": scientific_name,
+            "confidence": confidence,
+            "added_to_flock": False,
+        }
+
+    # Possible identification.
+    if confidence < 0.70:
+        return {
+            "species": common_name,
+            "scientific_name": scientific_name,
+            "confidence": confidence,
+            "added_to_flock": False,
+        }
+
+    # Confident identification.
+    bird_info = await get_bird_info(
+        scientific_name
+    )
+
+    flock = add_discovery(
+        common_name=common_name,
+        scientific_name=scientific_name,
+        image_url=bird_info["image_url"],
+        description=bird_info["description"],
+    )
 
     return {
-        "bird": common_name,
+        "species": common_name,
         "scientific_name": scientific_name,
+        "description": bird_info["description"],
         "confidence": confidence,
-        "confidence_level": confidence_level,
+        "added_to_flock": True,
+        "new_discovery": flock["new_discovery"],
+        "xp_earned": flock["xp_earned"],
+        "total_xp": flock["total_xp"],
+        "level": flock["level"],
+        "bird_xp": flock["bird_xp"],
+        "times_identified": flock["times_identified"],
+        "image_url": bird_info["image_url"],
     }

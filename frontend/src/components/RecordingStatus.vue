@@ -17,15 +17,24 @@ defineProps({
 
 <template>
   <div class="status-container">
-    <p v-if="isRecording" class="status">
+    <p
+      v-if="isRecording"
+      class="status"
+    >
       Listen for 6 seconds...
     </p>
 
-    <p v-if="isIdentifying" class="status">
+    <p
+      v-if="isIdentifying"
+      class="status"
+    >
       BirdNET is identifying the sound...
     </p>
 
-    <p v-if="errorMessage" class="status error">
+    <p
+      v-if="errorMessage"
+      class="status error"
+    >
       {{ errorMessage }}
     </p>
   </div>
@@ -34,6 +43,9 @@ defineProps({
 <style scoped>
 .status-container {
   min-height: 44px;
+  display: flex;
+  justify-content: center;
+  text-align: center;
 }
 
 .status {
